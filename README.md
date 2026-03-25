@@ -21,6 +21,7 @@ EventHorizon is a decentralized "If-This-Then-That" (IFTTT) platform that listen
 ### Prerequisites
 - Node.js (v18+)
 - MongoDB
+- Redis (optional, for background job processing - see [REDIS_OPTIONAL.md](backend/REDIS_OPTIONAL.md))
 - Rust & Soroban CLI (for contracts)
 
 ### Environment Setup
@@ -43,6 +44,15 @@ npm run dev:frontend
 ### API Documentation
 - Interactive Swagger UI is available at `/api/docs` when the backend is running.
 - Raw OpenAPI JSON is available at `/api/docs/openapi.json`.
+
+### Background Job Processing
+EventHorizon uses BullMQ with Redis for reliable background processing of trigger actions:
+- **Guaranteed delivery** with automatic retries
+- **Concurrency control** for external API calls
+- **Job monitoring** via `/api/queue/stats` endpoint
+- **Optional**: Works without Redis (falls back to direct execution)
+- See [backend/QUEUE_SETUP.md](backend/QUEUE_SETUP.md) for setup instructions
+- See [backend/REDIS_OPTIONAL.md](backend/REDIS_OPTIONAL.md) for fallback behavior
 
 ## 🧪 Testing with the Boilerplate Contract
 1. Deploy the contract in `/contracts`.

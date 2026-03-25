@@ -26,6 +26,7 @@ app.use("/api/auth", authRateLimiter);
 app.use("/api/docs", require("./routes/docs.routes"));
 app.use("/api/triggers", require("./routes/trigger.routes"));
 app.use("/api/stats", require("./routes/stats.routes"));
+app.use("/api/queue", require("./routes/queue.routes"));
 /**
  * @openapi
  * /api/health:
@@ -57,12 +58,42 @@ mongoose
       status: "connected",
       uri: process.env.MONGO_URI?.replace(/\/\/.*@/, "//***@"), // Hide credentials in logs
     });
+    
+    let worker = null;
+    
+    // Initialize BullMQ Worker (optional - graceful fallback if Redis unavailable)
+    try {
+      const { createWorker } = require('./worker/processor');
+      worker = createWorker();
+      logger.info("BullMQ queue system enabled");
+    } catch (error) {
+      logger.warn("BullMQ worker initialization failed - queue system disabled", {
+        error: error.message,
+        note: "Install and start Redis to enable background job processing"
+      });
+    }
+    
+    // Initialize Event Poller
+    const eventPoller = require('./worker/poller');
+    eventPoller.start();
+    
     app.listen(PORT, () => {
       logger.info("Server started successfully", {
         port: PORT,
         environment: process.env.NODE_ENV || "development",
         pid: process.pid,
+        queueEnabled: worker !== null,
       });
+    });
+    
+    // Graceful shutdown
+    process.on('SIGTERM', async () => {
+      logger.info('SIGTERM received, shutting down gracefully');
+      if (worker) {
+        await worker.close();
+      }
+      await mongoose.connection.close();
+      process.exit(0);
     });
   })
   .catch((err) => {
@@ -73,10 +104,6 @@ mongoose
     });
     process.exit(1);
   });
-
-// TODO: Initialize Workers
-// const eventPoller = require('./worker/poller');
-// eventPoller.start();
 
 // Error handling middleware (should be last)
 app.use(errorLogger);
