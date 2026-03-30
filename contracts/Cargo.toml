@@ -12,6 +12,7 @@ members = [
     "subscriptions",
     "nft_factory",
     "multisig_wallet",
+    "yield_vault",
 ]
 
 [profile.release]
