@@ -5,7 +5,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "migrate:audit": "node scripts/migrate-audit.js"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.0.0",
