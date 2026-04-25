@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "airdrop",
+    "boilerplate",
+    "gas_estimator",
+    "token_vesting",
+    "staking",
+    "escrow",
+    "amm_pool",
+    "dao_governance",
+    "lending_base",
+    "subscriptions",
+    "nft_factory",
+    "multisig_wallet",
+    "yield_vault",
+    "prediction_market",
+    "emitter_registry",
+    "flash_loan",
+]
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = false
+panic = "abort"
+incremental = false
+codegen-units = 1
+lto = true
