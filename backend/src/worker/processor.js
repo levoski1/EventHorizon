@@ -5,6 +5,7 @@ const { sendEventNotification } = require('../services/email.service');
 const { sendDiscordNotification } = require('../services/discord.service');
 const telegramService = require('../services/telegram.service');
 const webhookService = require('../services/webhook.service');
+const { checkThreshold } = require('../services/dlq.service');
 const logger = require('../config/logger');
 
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
@@ -313,6 +314,12 @@ function createWorker() {
             error: err.message,
             attemptsRemaining: job ? job.opts.attempts - job.attemptsMade : 0,
         });
+
+        // Trigger DLQ threshold alert if job has exhausted all retries
+        if (job && job.attemptsMade >= (job.opts.attempts || 1)) {
+            const network = job.data?.trigger?.network || 'testnet';
+            checkThreshold(network);
+        }
     });
 
     worker.on('error', (err) => {

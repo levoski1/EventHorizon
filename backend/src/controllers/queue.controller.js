@@ -1,5 +1,6 @@
 const { getQueueStats, cleanQueue, getActionQueue } = require('../worker/queue');
 const batchService = require('../services/batch.service');
+const dlqService = require('../services/dlq.service');
 const logger = require('../config/logger');
 
 /**
@@ -176,9 +177,86 @@ async function retryJob(req, res) {
     }
 }
 
+/**
+ * List all failed jobs (DLQ), with fail reason and stack trace.
+ */
+async function getDlqJobs(req, res) {
+    try {
+        const { network, start = 0, end = 99 } = req.query;
+        const data = await dlqService.getFailedJobs(network, { start: Number(start), end: Number(end) });
+        res.json({ success: true, data });
+    } catch (error) {
+        logger.error('DLQ: failed to list jobs', { error: error.message });
+        res.status(500).json({ success: false, error: error.message });
+    }
+}
+
+/**
+ * Replay a single failed job.
+ */
+async function replayDlqJob(req, res) {
+    try {
+        const { jobId } = req.params;
+        const { network = 'testnet' } = req.query;
+        const data = await dlqService.replayJob(network, jobId);
+        res.json({ success: true, data });
+    } catch (error) {
+        const status = error.message.includes('not found') ? 404 : 500;
+        res.status(status).json({ success: false, error: error.message });
+    }
+}
+
+/**
+ * Replay all failed jobs in a network queue.
+ */
+async function replayAllDlqJobs(req, res) {
+    try {
+        const { network = 'testnet' } = req.query;
+        const data = await dlqService.replayAllFailed(network);
+        res.json({ success: true, data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+}
+
+/**
+ * Clear specific failed jobs by IDs.
+ */
+async function clearDlqJobs(req, res) {
+    try {
+        const { network = 'testnet' } = req.query;
+        const { jobIds } = req.body;
+        if (!Array.isArray(jobIds) || jobIds.length === 0) {
+            return res.status(400).json({ success: false, error: 'jobIds must be a non-empty array' });
+        }
+        const data = await dlqService.clearJobs(network, jobIds);
+        res.json({ success: true, data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+}
+
+/**
+ * Clear all failed jobs in a network queue.
+ */
+async function clearAllDlqJobs(req, res) {
+    try {
+        const { network = 'testnet' } = req.query;
+        const data = await dlqService.clearAllFailed(network);
+        res.json({ success: true, data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+}
+
 module.exports = {
     getStats,
     getJobs,
     clean,
     retryJob,
+    getDlqJobs,
+    replayDlqJob,
+    replayAllDlqJobs,
+    clearDlqJobs,
+    clearAllDlqJobs,
 };
