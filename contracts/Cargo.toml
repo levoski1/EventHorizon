@@ -18,6 +18,8 @@ members = [
     "prediction_resolution_engine",
     "emitter_registry",
     "flash_loan",
+    "task_queue",
+    "event_wrapper",
 ]
 
 [profile.release]

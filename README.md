@@ -14,6 +14,7 @@ EventHorizon is a decentralized "If-This-Then-That" (IFTTT) platform that listen
 -   `/contracts/boilerplate`: Boilerplate Soroban Rust contract for testing.
 -   `/contracts/token_vesting`: Secure token vesting contract with linear release and cliff.
 -   `/contracts/staking`: Reward-based staking contract with early unstake penalties.
+-   `/contracts/task_queue`: On-chain task queue with expiry/trigger logic for off-chain worker automation.
 
 
 ## 🛠️ Setup & Installation
@@ -172,6 +173,72 @@ GET /api/admin/audit/resources/507f1f77bcf86cd799439011/trail
 **Get daily activity statistics:**
 ```
 GET /api/admin/audit/stats?startDate=2024-01-01&endDate=2024-01-31
+```
+
+## ⏱️ Task Queue Contract
+
+The `task_queue` contract (`/contracts/task_queue`) provides an on-chain queue of scheduled tasks that an off-chain worker monitors and executes.
+
+### How It Works
+
+1. A user calls `register` with an opaque `payload` (e.g., a webhook URL or encoded call) and a `trigger_at` timestamp.
+2. The contract stores the task and emits a `registered` event with the full payload.
+3. The off-chain worker watches for `registered` / `bumped` events and waits until `trigger_at`.
+4. Once due, anyone (typically the worker) calls `trigger`, which emits a `triggered` event with the full payload for the worker to act on.
+
+### Storage Design
+
+Tasks are stored in **persistent storage keyed by task ID** (a simple mapping). A single instance-storage counter tracks the next ID. This is more gas-efficient than a linked list for this use case because the off-chain worker drives iteration via events — the contract never needs to traverse the queue.
+
+### Contract Functions
+
+| Function | Auth | Description |
+|---|---|---|
+| `register(owner, payload, trigger_at) → u64` | `owner` | Register a new task; returns its ID |
+| `bump(task_id, new_trigger_at)` | `owner` | Extend the trigger time of a pending task |
+| `cancel(task_id)` | `owner` | Cancel a pending task |
+| `trigger(task_id)` | anyone | Mark a due task as triggered (emits full payload) |
+| `get_task(task_id) → Task` | — | Read a task record |
+| `next_id() → u64` | — | Read the next task ID counter |
+
+### Events
+
+Every state-changing function emits an event with the **full `Task` struct** as the value, so the off-chain worker never needs to query storage separately.
+
+| Topic symbol | When emitted |
+|---|---|
+| `registered` | New task created |
+| `bumped` | Trigger time extended |
+| `cancelled` | Task cancelled by owner |
+| `triggered` | Task executed (worker should act on `payload`) |
+
+### Task Struct
+
+```rust
+pub struct Task {
+    pub id: u64,
+    pub owner: Address,
+    pub payload: Bytes,   // arbitrary bytes — encode whatever the worker needs
+    pub trigger_at: u64,  // ledger timestamp
+    pub status: TaskStatus, // Pending | Triggered | Cancelled
+}
+```
+
+### Example Usage
+
+```bash
+# Register a task due in 1 hour (ledger timestamp + 3600)
+soroban contract invoke --id <CONTRACT_ID> -- register \
+  --owner <YOUR_ADDRESS> \
+  --payload <HEX_PAYLOAD> \
+  --trigger_at <TIMESTAMP>
+
+# Bump the deadline
+soroban contract invoke --id <CONTRACT_ID> -- bump \
+  --task_id 0 --new_trigger_at <LATER_TIMESTAMP>
+
+# Trigger once due (called by the off-chain worker)
+soroban contract invoke --id <CONTRACT_ID> -- trigger --task_id 0
 ```
 
 ## 🧪 Testing with the Boilerplate Contract
