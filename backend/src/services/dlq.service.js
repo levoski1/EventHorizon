@@ -1,142 +1,165 @@
 const axios = require('axios');
-const { queues } = require('../worker/queue');
 const logger = require('../config/logger');
+const { getActionQueue, queues } = require('../worker/queue');
 
-const DLQ_ALERT_THRESHOLD = Number(process.env.DLQ_ALERT_THRESHOLD || 10);
-const DLQ_SLACK_WEBHOOK_URL = process.env.DLQ_SLACK_WEBHOOK_URL;
-const DLQ_DISCORD_WEBHOOK_URL = process.env.DLQ_DISCORD_WEBHOOK_URL;
+const DLQ_THRESHOLD = Number(process.env.DLQ_ALERT_THRESHOLD || 10);
+const DLQ_ALERT_WEBHOOK = process.env.DLQ_ALERT_WEBHOOK_URL || '';
+const DLQ_ALERT_TYPE = (process.env.DLQ_ALERT_TYPE || 'discord').toLowerCase(); // 'discord' | 'slack'
 
 /**
- * Get all failed jobs across all network queues, with fail reason and stack trace.
+ * Send a threshold alert to Discord or Slack.
  */
-async function getFailedJobs(network, { start = 0, end = 99 } = {}) {
-    const results = {};
+async function sendThresholdAlert(network, failedCount) {
+    if (!DLQ_ALERT_WEBHOOK) return;
 
-    const targets = network
-        ? { [network]: queues[network] }
-        : queues;
+    const text = `🚨 *DLQ Alert* — \`${network}\` queue has *${failedCount}* failed jobs (threshold: ${DLQ_THRESHOLD})`;
 
-    for (const [net, queue] of Object.entries(targets)) {
-        if (!queue) continue;
-        const jobs = await queue.getFailed(start, end);
-        results[net] = jobs.map(job => ({
-            id: job.id,
-            name: job.name,
-            data: job.data,
-            failedReason: job.failedReason,
-            stacktrace: job.stacktrace,
-            attemptsMade: job.attemptsMade,
-            timestamp: job.timestamp,
-            finishedOn: job.finishedOn,
-        }));
+    try {
+        if (DLQ_ALERT_TYPE === 'slack') {
+            await axios.post(DLQ_ALERT_WEBHOOK, { text });
+        } else {
+            // Discord webhook format
+            await axios.post(DLQ_ALERT_WEBHOOK, {
+                embeds: [{
+                    title: '🚨 DLQ Threshold Exceeded',
+                    description: text,
+                    color: 0xFF0000,
+                    fields: [
+                        { name: 'Network', value: network, inline: true },
+                        { name: 'Failed Jobs', value: String(failedCount), inline: true },
+                        { name: 'Threshold', value: String(DLQ_THRESHOLD), inline: true },
+                    ],
+                    timestamp: new Date().toISOString(),
+                }],
+            });
+        }
+        logger.info('DLQ threshold alert sent', { network, failedCount });
+    } catch (err) {
+        logger.error('Failed to send DLQ alert', { error: err.message });
     }
-
-    return results;
 }
 
 /**
- * Replay (retry) a single failed job by ID.
+ * Check failed count against threshold and alert if exceeded.
+ * Called from the worker's 'failed' event.
+ */
+async function checkThreshold(network) {
+    try {
+        const queue = getActionQueue(network);
+        const failedCount = await queue.getFailedCount();
+        if (failedCount >= DLQ_THRESHOLD) {
+            await sendThresholdAlert(network, failedCount);
+        }
+    } catch (err) {
+        logger.error('DLQ threshold check failed', { network, error: err.message });
+    }
+}
+
+/**
+ * List failed jobs with fail reason and stack trace.
+ */
+async function listFailed(network = 'testnet', start = 0, end = 49) {
+    const queue = getActionQueue(network);
+    const jobs = await queue.getFailed(start, end);
+    return jobs.map(job => ({
+        id: job.id,
+        name: job.name,
+        data: job.data,
+        failedReason: job.failedReason,
+        stacktrace: job.stacktrace,
+        attemptsMade: job.attemptsMade,
+        timestamp: job.timestamp,
+        finishedOn: job.finishedOn,
+    }));
+}
+
+/**
+ * Get a single failed job by ID.
+ */
+async function getFailedJob(network, jobId) {
+    const queue = getActionQueue(network);
+    const job = await queue.getJob(jobId);
+    if (!job) return null;
+    return {
+        id: job.id,
+        name: job.name,
+        data: job.data,
+        failedReason: job.failedReason,
+        stacktrace: job.stacktrace,
+        attemptsMade: job.attemptsMade,
+        timestamp: job.timestamp,
+        finishedOn: job.finishedOn,
+        opts: job.opts,
+    };
+}
+
+/**
+ * Replay (retry) a single failed job.
  */
 async function replayJob(network, jobId) {
-    const queue = queues[network];
-    if (!queue) throw new Error(`Queue for network '${network}' not found`);
-
+    const queue = getActionQueue(network);
     const job = await queue.getJob(jobId);
-    if (!job) throw new Error(`Job '${jobId}' not found in network '${network}'`);
-
+    if (!job) throw new Error(`Job ${jobId} not found`);
     await job.retry('failed');
-    logger.info('DLQ: job replayed', { network, jobId });
-    return { jobId, network };
+    logger.info('DLQ job replayed', { network, jobId });
+    return { jobId };
 }
 
 /**
  * Replay all failed jobs in a network queue.
  */
-async function replayAllFailed(network) {
-    const queue = queues[network];
-    if (!queue) throw new Error(`Queue for network '${network}' not found`);
-
+async function replayAll(network) {
+    const queue = getActionQueue(network);
     const jobs = await queue.getFailed(0, -1);
-    await Promise.all(jobs.map(job => job.retry('failed')));
-    logger.info('DLQ: all failed jobs replayed', { network, count: jobs.length });
-    return { network, replayed: jobs.length };
+    await Promise.all(jobs.map(j => j.retry('failed')));
+    logger.info('DLQ all jobs replayed', { network, count: jobs.length });
+    return { replayed: jobs.length };
 }
 
 /**
- * Remove (clear) specific failed jobs by IDs.
+ * Remove a single failed job.
  */
-async function clearJobs(network, jobIds) {
-    const queue = queues[network];
-    if (!queue) throw new Error(`Queue for network '${network}' not found`);
+async function removeJob(network, jobId) {
+    const queue = getActionQueue(network);
+    const job = await queue.getJob(jobId);
+    if (!job) throw new Error(`Job ${jobId} not found`);
+    await job.remove();
+    logger.info('DLQ job removed', { network, jobId });
+    return { jobId };
+}
 
-    let removed = 0;
-    for (const jobId of jobIds) {
-        const job = await queue.getJob(jobId);
-        if (job) {
-            await job.remove();
-            removed++;
-        }
+/**
+ * Bulk-clear all failed jobs in a network queue.
+ */
+async function clearAll(network) {
+    const queue = getActionQueue(network);
+    // clean(grace, limit, type) — 0ms grace removes all
+    const removed = await queue.clean(0, 0, 'failed');
+    logger.info('DLQ bulk cleared', { network, removed: removed.length });
+    return { removed: removed.length };
+}
+
+/**
+ * DLQ stats across all networks.
+ */
+async function getStats() {
+    const stats = {};
+    for (const [network, queue] of Object.entries(queues)) {
+        stats[network] = {
+            failed: await queue.getFailedCount(),
+            threshold: DLQ_THRESHOLD,
+        };
     }
-    logger.info('DLQ: jobs cleared', { network, removed });
-    return { network, removed };
-}
-
-/**
- * Remove all failed jobs in a network queue.
- */
-async function clearAllFailed(network) {
-    const queue = queues[network];
-    if (!queue) throw new Error(`Queue for network '${network}' not found`);
-
-    const jobs = await queue.getFailed(0, -1);
-    await Promise.all(jobs.map(job => job.remove()));
-    logger.info('DLQ: all failed jobs cleared', { network, count: jobs.length });
-    return { network, removed: jobs.length };
-}
-
-/**
- * Check failed job count against threshold and send alerts if exceeded.
- */
-async function checkThresholdAndAlert(network, queue) {
-    try {
-        const counts = await queue.getJobCounts('failed');
-        const failedCount = counts.failed || 0;
-
-        if (failedCount < DLQ_ALERT_THRESHOLD) return;
-
-        logger.warn('DLQ threshold exceeded', { network, failedCount, threshold: DLQ_ALERT_THRESHOLD });
-
-        const message = `🚨 *DLQ Alert* — \`${network}\` queue has *${failedCount}* failed jobs (threshold: ${DLQ_ALERT_THRESHOLD})`;
-
-        await Promise.allSettled([
-            DLQ_SLACK_WEBHOOK_URL && sendSlackAlert(message),
-            DLQ_DISCORD_WEBHOOK_URL && sendDiscordAlert(message, network, failedCount),
-        ]);
-    } catch (err) {
-        logger.error('DLQ threshold check failed', { error: err.message });
-    }
-}
-
-async function sendSlackAlert(text) {
-    await axios.post(DLQ_SLACK_WEBHOOK_URL, { text });
-}
-
-async function sendDiscordAlert(content, network, failedCount) {
-    await axios.post(DLQ_DISCORD_WEBHOOK_URL, {
-        embeds: [{
-            title: '🚨 DLQ Threshold Exceeded',
-            description: `Queue \`${network}\` has **${failedCount}** failed jobs`,
-            color: 0xFF0000,
-            timestamp: new Date().toISOString(),
-        }],
-    });
+    return stats;
 }
 
 module.exports = {
-    getFailedJobs,
+    checkThreshold,
+    listFailed,
+    getFailedJob,
     replayJob,
-    replayAllFailed,
-    clearJobs,
-    clearAllFailed,
-    checkThresholdAndAlert,
+    replayAll,
+    removeJob,
+    clearAll,
+    getStats,
 };
