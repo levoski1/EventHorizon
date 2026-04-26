@@ -1,129 +1,186 @@
-const axios = require('axios');
 const { queues } = require('../worker/queue');
+const slackService = require('./slack.service');
+const axios = require('axios');
 const logger = require('../config/logger');
 
-const DLQ_THRESHOLD = parseInt(process.env.DLQ_THRESHOLD || '10', 10);
+const DLQ_THRESHOLD = Number(process.env.DLQ_ALERT_THRESHOLD || 10);
 
-/** Serialize a BullMQ job into a DLQ-friendly shape. */
-function serializeJob(job, network) {
+/**
+ * Format a failed BullMQ job for API responses.
+ */
+function formatJob(job) {
     return {
         id: job.id,
         name: job.name,
-        network,
         data: job.data,
         failedReason: job.failedReason,
         stacktrace: job.stacktrace,
         attemptsMade: job.attemptsMade,
         timestamp: job.timestamp,
+        processedOn: job.processedOn,
         finishedOn: job.finishedOn,
     };
 }
 
 /**
- * List failed jobs across all (or a specific) network queue.
- * @param {string|null} network  - filter to one network, or null for all
- * @param {number} start
- * @param {number} end
+ * Get all failed jobs across all networks (or a specific one).
  */
-async function listFailed(network = null, start = 0, end = 49) {
-    const targets = network
-        ? { [network]: queues[network] }
-        : queues;
+async function getFailedJobs({ network, start = 0, end = 99 } = {}) {
+    const result = {};
+    const targets = network ? { [network]: queues[network] } : queues;
 
-    if (network && !queues[network]) {
-        throw new Error(`Queue for network "${network}" not found`);
-    }
-
-    const results = [];
     for (const [net, queue] of Object.entries(targets)) {
+        if (!queue) continue;
         const jobs = await queue.getFailed(start, end);
-        results.push(...jobs.map(j => serializeJob(j, net)));
+        result[net] = jobs.map(formatJob);
     }
-    return results;
+    return result;
 }
 
 /**
- * Replay (retry) a single failed job by id.
- * Searches all queues unless network is specified.
+ * Get a single failed job by id.
  */
-async function replayJob(jobId, network = null) {
+async function getFailedJob(network, jobId) {
+    const queue = queues[network];
+    if (!queue) throw new Error(`Queue for network '${network}' not found`);
+    const job = await queue.getJob(jobId);
+    if (!job) return null;
+    return formatJob(job);
+}
+
+/**
+ * Replay (retry) a single failed job.
+ */
+async function replayJob(network, jobId) {
+    const queue = queues[network];
+    if (!queue) throw new Error(`Queue for network '${network}' not found`);
+    const job = await queue.getJob(jobId);
+    if (!job) return null;
+    await job.retry('failed');
+    logger.info('DLQ: job replayed', { network, jobId });
+    return { jobId, status: 'replayed' };
+}
+
+/**
+ * Replay all failed jobs for a network (or all networks).
+ */
+async function replayAll(network) {
     const targets = network ? { [network]: queues[network] } : queues;
+    const summary = {};
 
     for (const [net, queue] of Object.entries(targets)) {
-        const job = await queue.getJob(jobId);
-        if (job) {
-            await job.retry('failed');
-            logger.info('DLQ: job replayed', { jobId, network: net });
-            return { jobId, network: net };
+        if (!queue) continue;
+        const jobs = await queue.getFailed(0, -1);
+        let replayed = 0;
+        for (const job of jobs) {
+            try {
+                await job.retry('failed');
+                replayed++;
+            } catch (err) {
+                logger.warn('DLQ: failed to replay job', { net, jobId: job.id, error: err.message });
+            }
         }
+        summary[net] = { replayed, total: jobs.length };
+        logger.info('DLQ: bulk replay', { network: net, ...summary[net] });
     }
-    throw Object.assign(new Error('Job not found'), { statusCode: 404 });
+    return summary;
 }
 
 /**
- * Bulk-clear all failed jobs across all (or a specific) network queue.
- * Returns the total count removed.
+ * Remove a single failed job.
  */
-async function clearFailed(network = null) {
+async function clearJob(network, jobId) {
+    const queue = queues[network];
+    if (!queue) throw new Error(`Queue for network '${network}' not found`);
+    const job = await queue.getJob(jobId);
+    if (!job) return null;
+    await job.remove();
+    logger.info('DLQ: job removed', { network, jobId });
+    return { jobId, status: 'removed' };
+}
+
+/**
+ * Bulk-clear all failed jobs for a network (or all networks).
+ */
+async function clearAll(network) {
     const targets = network ? { [network]: queues[network] } : queues;
-    let total = 0;
+    const summary = {};
 
-    for (const queue of Object.values(targets)) {
-        // grace=0 removes jobs immediately; limit=Infinity clears all
-        const removed = await queue.clean(0, Infinity, 'failed');
-        total += removed.length;
+    for (const [net, queue] of Object.entries(targets)) {
+        if (!queue) continue;
+        // BullMQ clean: grace=0, limit=0 (unlimited), type='failed'
+        const removed = await queue.clean(0, 0, 'failed');
+        summary[net] = { removed: removed.length };
+        logger.info('DLQ: bulk clear', { network: net, removed: removed.length });
     }
-    logger.info('DLQ: bulk clear completed', { network, removed: total });
-    return total;
+    return summary;
 }
 
 /**
- * Return per-network failed counts and a grand total.
+ * Get DLQ counts per network.
  */
-async function getStats() {
-    const perNetwork = {};
-    let total = 0;
-
+async function getDLQStats() {
+    const stats = {};
     for (const [net, queue] of Object.entries(queues)) {
         const counts = await queue.getJobCounts('failed');
-        perNetwork[net] = counts.failed ?? 0;
-        total += perNetwork[net];
+        stats[net] = counts.failed ?? 0;
     }
-    return { total, perNetwork };
+    return stats;
+}
+
+// ─── Alerting ────────────────────────────────────────────────────────────────
+
+async function sendDiscordAlert(webhookUrl, message) {
+    await axios.post(webhookUrl, { content: message });
 }
 
 /**
- * Send a DLQ threshold alert to Slack and/or Discord.
- * Called automatically after any operation that may change the failed count.
+ * Check DLQ thresholds and fire alerts if exceeded.
+ * Called after job failures or on a schedule.
  */
-async function checkThresholdAndAlert() {
-    const { total } = await getStats();
-    if (total < DLQ_THRESHOLD) return;
-
-    const text = `🚨 *DLQ Alert*: ${total} failed jobs across all queues (threshold: ${DLQ_THRESHOLD})`;
-
+async function checkAndAlert() {
     const slackUrl = process.env.SLACK_WEBHOOK_URL;
-    const discordUrl = process.env.DISCORD_WEBHOOK_URL;
+    const discordUrl = process.env.DLQ_DISCORD_WEBHOOK_URL;
 
-    const sends = [];
+    if (!slackUrl && !discordUrl) return;
+
+    const stats = await getDLQStats();
+    const breached = Object.entries(stats).filter(([, count]) => count >= DLQ_THRESHOLD);
+
+    if (breached.length === 0) return;
+
+    const lines = breached.map(([net, count]) => `• ${net}: ${count} failed jobs`).join('\n');
+    const text = `🚨 *DLQ Alert* — Failed job threshold (${DLQ_THRESHOLD}) exceeded:\n${lines}`;
+
+    const tasks = [];
 
     if (slackUrl) {
-        sends.push(
-            axios.post(slackUrl, { text }).catch(err =>
+        tasks.push(
+            slackService.sendSlackAlert(slackUrl, { text }).catch(err =>
                 logger.error('DLQ Slack alert failed', { error: err.message })
             )
         );
     }
 
     if (discordUrl) {
-        sends.push(
-            axios.post(discordUrl, { content: text }).catch(err =>
+        tasks.push(
+            sendDiscordAlert(discordUrl, text).catch(err =>
                 logger.error('DLQ Discord alert failed', { error: err.message })
             )
         );
     }
 
-    await Promise.all(sends);
+    await Promise.all(tasks);
+    logger.info('DLQ alert sent', { breached: breached.map(([n]) => n) });
 }
 
-module.exports = { listFailed, replayJob, clearFailed, getStats, checkThresholdAndAlert };
+module.exports = {
+    getFailedJobs,
+    getFailedJob,
+    replayJob,
+    replayAll,
+    clearJob,
+    clearAll,
+    getDLQStats,
+    checkAndAlert,
+};

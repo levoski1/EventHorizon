@@ -1,55 +1,66 @@
 const express = require('express');
 const router = express.Router();
-const asyncHandler = require('../utils/asyncHandler');
 const c = require('../controllers/dlq.controller');
 
 /**
  * @swagger
  * tags:
  *   name: DLQ
- *   description: Dead Letter Queue management
+ *   description: Dead Letter Queue management — inspect, replay, and clear failed jobs
  */
-
-/**
- * @swagger
- * /api/dlq/jobs:
- *   get:
- *     summary: List failed jobs (DLQ)
- *     tags: [DLQ]
- *     parameters:
- *       - in: query
- *         name: network
- *         schema: { type: string }
- *         description: Filter by network (omit for all)
- *       - in: query
- *         name: start
- *         schema: { type: integer, default: 0 }
- *       - in: query
- *         name: end
- *         schema: { type: integer, default: 49 }
- *     responses:
- *       200:
- *         description: List of failed jobs with fail reasons and stack traces
- */
-router.get('/jobs', asyncHandler(c.listFailed));
 
 /**
  * @swagger
  * /api/dlq/stats:
  *   get:
- *     summary: DLQ statistics (failed counts per network)
+ *     summary: Get failed job counts per network
  *     tags: [DLQ]
  *     responses:
  *       200:
- *         description: Per-network and total failed job counts
+ *         description: DLQ statistics
  */
-router.get('/stats', asyncHandler(c.getStats));
+router.get('/stats', c.getStats);
 
 /**
  * @swagger
- * /api/dlq/jobs/{jobId}/replay:
- *   post:
- *     summary: Replay (retry) a single failed job
+ * /api/dlq/jobs:
+ *   get:
+ *     summary: List failed jobs with fail reasons and stack traces
+ *     tags: [DLQ]
+ *     parameters:
+ *       - in: query
+ *         name: network
+ *         schema: { type: string }
+ *         description: Filter by network (omit for all networks)
+ *       - in: query
+ *         name: start
+ *         schema: { type: integer, default: 0 }
+ *       - in: query
+ *         name: end
+ *         schema: { type: integer, default: 99 }
+ *     responses:
+ *       200:
+ *         description: Failed jobs list
+ *   delete:
+ *     summary: Bulk-clear all failed jobs
+ *     tags: [DLQ]
+ *     parameters:
+ *       - in: query
+ *         name: network
+ *         schema: { type: string }
+ *         description: Scope to a specific network (omit for all)
+ *     responses:
+ *       200:
+ *         description: Cleared job counts per network
+ */
+router.get('/jobs', c.getJobs);
+router.delete('/jobs', c.clearAll);
+
+/**
+ * @swagger
+ * /api/dlq/jobs/{jobId}:
+ *   get:
+ *     summary: Get a single failed job
  *     tags: [DLQ]
  *     parameters:
  *       - in: path
@@ -58,55 +69,69 @@ router.get('/stats', asyncHandler(c.getStats));
  *         schema: { type: string }
  *       - in: query
  *         name: network
- *         schema: { type: string }
+ *         schema: { type: string, default: testnet }
  *     responses:
  *       200:
- *         description: Job re-queued
+ *         description: Job details
+ *       404:
+ *         description: Job not found
+ *   delete:
+ *     summary: Remove a single failed job
+ *     tags: [DLQ]
+ *     parameters:
+ *       - in: path
+ *         name: jobId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: network
+ *         schema: { type: string, default: testnet }
+ *     responses:
+ *       200:
+ *         description: Job removed
  *       404:
  *         description: Job not found
  */
-router.post('/jobs/:jobId/replay', asyncHandler(c.replayJob));
+router.get('/jobs/:jobId', c.getJob);
+router.delete('/jobs/:jobId', c.clearJob);
 
 /**
  * @swagger
- * /api/dlq/jobs/replay:
+ * /api/dlq/jobs/{jobId}/replay:
  *   post:
- *     summary: Bulk replay failed jobs
+ *     summary: Replay a single failed job
  *     tags: [DLQ]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [jobIds]
- *             properties:
- *               jobIds:
- *                 type: array
- *                 items: { type: string }
- *               network:
- *                 type: string
+ *     parameters:
+ *       - in: path
+ *         name: jobId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: network
+ *         schema: { type: string, default: testnet }
  *     responses:
  *       200:
- *         description: Bulk replay results
+ *         description: Job replayed
+ *       404:
+ *         description: Job not found
  */
-router.post('/jobs/replay', asyncHandler(c.bulkReplay));
+router.post('/jobs/:jobId/replay', c.replayJob);
 
 /**
  * @swagger
- * /api/dlq/jobs:
- *   delete:
- *     summary: Bulk clear all failed jobs
+ * /api/dlq/replay:
+ *   post:
+ *     summary: Replay all failed jobs
  *     tags: [DLQ]
  *     parameters:
  *       - in: query
  *         name: network
  *         schema: { type: string }
- *         description: Limit clear to one network (omit for all)
+ *         description: Scope to a specific network (omit for all)
  *     responses:
  *       200:
- *         description: Number of jobs removed
+ *         description: Replay summary per network
  */
-router.delete('/jobs', asyncHandler(c.clearFailed));
+router.post('/replay', c.replayAll);
 
 module.exports = router;
