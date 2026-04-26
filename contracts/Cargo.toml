@@ -19,6 +19,7 @@ members = [
     "emitter_registry",
     "flash_loan",
     "royalty_registry",
+    "task_scheduler",
 ]
 
 [profile.release]
