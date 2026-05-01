@@ -2,6 +2,9 @@
   "name": "backend",
   "version": "1.0.0",
   "main": "src/server.js",
+  "engines": {
+    "node": "^20 || ^22 || ^24"
+  },
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
@@ -26,6 +29,7 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^8.0.0",
     "node-vault": "^0.10.2",
+    "opossum": "^9.0.0",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1"
   },

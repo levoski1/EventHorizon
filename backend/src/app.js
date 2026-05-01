@@ -49,6 +49,7 @@ app.use('/api/discovery', require('./routes/discovery.routes'));
  *                   example: ok
  */
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+app.use('/api/health', require('./routes/health.routes'));
 
 app.use(errorLogger);
 app.use(notFoundHandler);
